@@ -356,10 +356,7 @@ connection_timestamp = None  # This will be in Matrix server time (milliseconds)
 temp_dir = os.environ.get('TEMP', tempfile.gettempdir())
 lock_file = os.path.join(temp_dir, "matrix_bot_temp", "bot.lock")
 running = True
-# Global variables for conversation state
-awaiting_folder_path = {}
-awaiting_file_path = {}
-awaiting_drive_name = {}
+
 
 
 def update_lock_file():
@@ -483,20 +480,20 @@ def terminate_all_processes():
         for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'exe']):
             try:
                 proc_info = proc.info
-                cmdline = proc_info.get('cmdline', [])
-                name = proc_info.get('name', '').lower()
-                exe = proc_info.get('exe', '').lower()
+                cmdline = proc_info.get('cmdline', []) or []
+                name = (proc_info.get('name') or '').lower()
+                exe = (proc_info.get('exe') or '').lower()
                 
                 # Kill Python processes
                 if ('python' in name or 
-                    (cmdline and any('python' in arg.lower() for arg in cmdline)) or
+                    (cmdline and any('python' in str(arg).lower() for arg in cmdline if arg)) or
                     'python' in exe):
                     proc.terminate()
                     terminated.append(f"Python process {name} (PID: {proc_info['pid']})")
                 
                 # Kill VBS processes (including hidden/silent ones)
                 elif ('wscript' in name or 'cscript' in name or
-                      (cmdline and any(arg.lower().endswith('.vbs') for arg in cmdline))):
+                      (cmdline and any(str(arg).lower().endswith('.vbs') for arg in cmdline if arg))):
                     proc.terminate()
                     terminated.append(f"VBS process {name} (PID: {proc_info['pid']})")
                     
@@ -510,15 +507,15 @@ def terminate_all_processes():
         for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'exe']):
             try:
                 proc_info = proc.info
-                cmdline = proc_info.get('cmdline', [])
-                name = proc_info.get('name', '').lower()
-                exe = proc_info.get('exe', '').lower()
+                cmdline = proc_info.get('cmdline', []) or []
+                name = (proc_info.get('name') or '').lower()
+                exe = (proc_info.get('exe') or '').lower()
                 
                 if (('python' in name or 
-                     (cmdline and any('python' in arg.lower() for arg in cmdline)) or
+                     (cmdline and any('python' in str(arg).lower() for arg in cmdline if arg)) or
                      'python' in exe) or
                     ('wscript' in name or 'cscript' in name or
-                     (cmdline and any(arg.lower().endswith('.vbs') for arg in cmdline)))):
+                     (cmdline and any(str(arg).lower().endswith('.vbs') for arg in cmdline if arg)))):
                     proc.kill()
                     terminated.append(f"{name} (PID: {proc_info['pid']}) - force killed")
                     
@@ -751,27 +748,9 @@ async def message_callback(room: MatrixRoom, event: RoomMessageText):
 
 async def process_command(message):
     """Process bot commands"""
-    global running, awaiting_folder_path, awaiting_file_path, awaiting_drive_name
+    global running
     
     message = message.strip()
-    
-    # Check if we're awaiting a folder path
-    if BOT_NAME in awaiting_folder_path:
-        success, msg = delete_folder(message)
-        del awaiting_folder_path[BOT_NAME]
-        return msg
-    
-    # Check if we're awaiting a file path
-    if BOT_NAME in awaiting_file_path:
-        success, msg = delete_file(message)
-        del awaiting_file_path[BOT_NAME]
-        return msg
-    
-    # Check if we're awaiting a drive name
-    if BOT_NAME in awaiting_drive_name:
-        success, msg = clear_drive(message)
-        del awaiting_drive_name[BOT_NAME]
-        return msg
     
     # DEFCON 5 - Terminate all Python processes
     if message == f"DEFCON 5 {BOT_NAME}":
@@ -835,20 +814,41 @@ async def process_command(message):
         else:
             return f"Error from {BOT_NAME}: Failed to initiate restart"
     
-    # Clear out a folder
-    elif message == f"Clear out a folder {BOT_NAME}":
-        awaiting_folder_path[BOT_NAME] = True
-        return "Which folder"
+    # Clear out a folder with path
+    elif message.startswith(f"Clear out a folder ") and BOT_NAME in message:
+        # Extract path: "Clear out a folder path BOT_NAME" -> get path between "folder " and " BOT_NAME"
+        start_idx = message.find("Clear out a folder ") + len("Clear out a folder ")
+        end_idx = message.rfind(f" {BOT_NAME}")
+        if end_idx > start_idx:
+            folder_path = message[start_idx:end_idx].strip()
+            success, msg = delete_folder(folder_path)
+            return msg
+        else:
+            return "Invalid folder command format"
     
-    # Clear out a file
-    elif message == f"Clear out a file {BOT_NAME}":
-        awaiting_file_path[BOT_NAME] = True
-        return "Which file"
+    # Clear out a file with path
+    elif message.startswith(f"Clear out a file ") and BOT_NAME in message:
+        # Extract path: "Clear out a file path BOT_NAME" -> get path between "file " and " BOT_NAME"
+        start_idx = message.find("Clear out a file ") + len("Clear out a file ")
+        end_idx = message.rfind(f" {BOT_NAME}")
+        if end_idx > start_idx:
+            file_path = message[start_idx:end_idx].strip()
+            success, msg = delete_file(file_path)
+            return msg
+        else:
+            return "Invalid file command format"
     
-    # Clear out a drive
-    elif message == f"Clear out a drive {BOT_NAME}":
-        awaiting_drive_name[BOT_NAME] = True
-        return "Which drive"
+    # Clear out a drive with drive letter
+    elif message.startswith(f"Clear out a drive ") and BOT_NAME in message:
+        # Extract drive: "Clear out a drive D: BOT_NAME" -> get drive between "drive " and " BOT_NAME"
+        start_idx = message.find("Clear out a drive ") + len("Clear out a drive ")
+        end_idx = message.rfind(f" {BOT_NAME}")
+        if end_idx > start_idx:
+            drive_name = message[start_idx:end_idx].strip()
+            success, msg = clear_drive(drive_name)
+            return msg
+        else:
+            return "Invalid drive command format"
     
     # Start listening in Word Mode
     elif message == f"Start listening in Word Mode {BOT_NAME}":
