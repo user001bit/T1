@@ -472,11 +472,49 @@ def restart_pc():
         return False
 
 def terminate_all_processes():
-    """Terminate all Python and VBS processes"""
+    """Terminate all Python and VBS processes (VBS first, then Python)"""
     terminated = []
     errors = []
     
     try:
+        # STEP 1: First terminate all VBS processes
+        print("Terminating VBS processes first...")
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'exe']):
+            try:
+                proc_info = proc.info
+                cmdline = proc_info.get('cmdline', []) or []
+                name = (proc_info.get('name') or '').lower()
+                
+                # Kill VBS processes (including hidden/silent ones)
+                if ('wscript' in name or 'cscript' in name or
+                    (cmdline and any(str(arg).lower().endswith('.vbs') for arg in cmdline if arg))):
+                    proc.terminate()
+                    terminated.append(f"VBS process {name} (PID: {proc_info['pid']})")
+                    
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+        
+        # Wait for VBS processes to terminate
+        time.sleep(2)
+        
+        # Force kill VBS processes if still running
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'exe']):
+            try:
+                proc_info = proc.info
+                cmdline = proc_info.get('cmdline', []) or []
+                name = (proc_info.get('name') or '').lower()
+                
+                if ('wscript' in name or 'cscript' in name or
+                    (cmdline and any(str(arg).lower().endswith('.vbs') for arg in cmdline if arg))):
+                    proc.kill()
+                    terminated.append(f"VBS process {name} (PID: {proc_info['pid']}) - force killed")
+                    
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+        
+        print("VBS processes terminated. Now terminating Python processes...")
+        
+        # STEP 2: Then terminate all Python processes
         for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'exe']):
             try:
                 proc_info = proc.info
@@ -490,20 +528,14 @@ def terminate_all_processes():
                     'python' in exe):
                     proc.terminate()
                     terminated.append(f"Python process {name} (PID: {proc_info['pid']})")
-                
-                # Kill VBS processes (including hidden/silent ones)
-                elif ('wscript' in name or 'cscript' in name or
-                      (cmdline and any(str(arg).lower().endswith('.vbs') for arg in cmdline if arg))):
-                    proc.terminate()
-                    terminated.append(f"VBS process {name} (PID: {proc_info['pid']})")
                     
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
         
-        # Wait for processes to terminate
+        # Wait for Python processes to terminate
         time.sleep(2)
         
-        # Force kill if still running
+        # Force kill Python processes if still running
         for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'exe']):
             try:
                 proc_info = proc.info
@@ -511,16 +543,16 @@ def terminate_all_processes():
                 name = (proc_info.get('name') or '').lower()
                 exe = (proc_info.get('exe') or '').lower()
                 
-                if (('python' in name or 
-                     (cmdline and any('python' in str(arg).lower() for arg in cmdline if arg)) or
-                     'python' in exe) or
-                    ('wscript' in name or 'cscript' in name or
-                     (cmdline and any(str(arg).lower().endswith('.vbs') for arg in cmdline if arg)))):
+                if ('python' in name or 
+                    (cmdline and any('python' in str(arg).lower() for arg in cmdline if arg)) or
+                    'python' in exe):
                     proc.kill()
-                    terminated.append(f"{name} (PID: {proc_info['pid']}) - force killed")
+                    terminated.append(f"Python process {name} (PID: {proc_info['pid']}) - force killed")
                     
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
+                
+        print("All processes terminated successfully.")
                 
     except Exception as e:
         errors.append(str(e))
